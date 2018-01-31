@@ -4,6 +4,7 @@
 
 package com.linkedin.kafka.cruisecontrol.detector;
 
+import com.linkedin.kafka.cruisecontrol.async.progress.OperationProgress;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingProposal;
@@ -14,7 +15,6 @@ import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.monitor.LoadMonitor;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelGeneration;
 import com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -23,6 +23,8 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
@@ -40,6 +42,7 @@ public class GoalViolationDetector implements Runnable {
   private final Time _time;
   private final Queue<Anomaly> _anomalies;
   private ModelGeneration _lastCheckedModelGeneration;
+  private final Pattern _excludedTopics;
 
   public GoalViolationDetector(KafkaCruiseControlConfig config,
                                LoadMonitor loadMonitor,
@@ -50,6 +53,7 @@ public class GoalViolationDetector implements Runnable {
     _goals = getDetectorGoalsMap(config);
     _anomalies = anomalies;
     _time = time;
+    _excludedTopics = Pattern.compile(config.getString(KafkaCruiseControlConfig.TOPICS_EXCLUDED_FROM_PARTITION_MOVEMENT_CONFIG));
   }
 
   private SortedMap<Integer, Goal> getDetectorGoalsMap(KafkaCruiseControlConfig config) {
@@ -80,7 +84,9 @@ public class GoalViolationDetector implements Runnable {
                 _loadMonitor.clusterModelGeneration());
       return;
     }
-    try (AutoCloseable ignored = _loadMonitor.acquireForModelGeneration()) {
+
+    AutoCloseable clusterModelSemaphore = null;
+    try {
       LoadMonitorTaskRunner.LoadMonitorTaskRunnerState loadMonitorTaskRunnerState = _loadMonitor.taskRunnerState();
       if (loadMonitorTaskRunnerState == LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.LOADING ||
           loadMonitorTaskRunnerState == LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.BOOTSTRAPPING) {
@@ -98,25 +104,15 @@ public class GoalViolationDetector implements Runnable {
           LOG.debug("Detecting if {} is violated.", entry.getValue().name());
           // Because the model generation could be slow, We only get new cluster model if needed.
           if (newModelNeeded) {
+            if (clusterModelSemaphore != null) {
+              clusterModelSemaphore.close();
+            }
+            clusterModelSemaphore = _loadMonitor.acquireForModelGeneration(new OperationProgress());
             // Make cluster model null before generating a new cluster model so the current one can be GCed.
             clusterModel = null;
-            clusterModel = _loadMonitor.clusterModel(now, goal.clusterModelCompletenessRequirements());
-            // The anomaly detector have to include all the topics in order to detect the rack awareness issue.
-            newModelNeeded = false;
+            clusterModel = _loadMonitor.clusterModel(now, goal.clusterModelCompletenessRequirements(), new OperationProgress());
           }
-          if (clusterModel.topics().isEmpty()) {
-            LOG.info("Skipping goal violation detection because the cluster model does not have any topic.");
-            return;
-          }
-          Map<TopicPartition, List<Integer>> initDistribution = clusterModel.getReplicaDistribution();
-          // We do not exclude any topics when we are doing anomaly detection.
-          goal.optimize(clusterModel, new HashSet<>(), Collections.emptySet());
-          Set<BalancingProposal> proposals = AnalyzerUtils.getDiff(initDistribution, clusterModel);
-          LOG.trace("{} generated {} proposals", goal.name(), proposals.size());
-          if (!proposals.isEmpty()) {
-            goalViolations.addViolation(priority, goal.name(), proposals);
-            newModelNeeded = true;
-          }
+          newModelNeeded = optimizeForGoal(clusterModel, priority, goal, goalViolations);
         } else {
           LOG.debug("Skipping goal violation for {} detection because load completeness requirement is not met.",
                     goal.name());
@@ -135,7 +131,42 @@ public class GoalViolationDetector implements Runnable {
     } catch (Exception e) {
       LOG.error("Unexpected exception", e);
     } finally {
+      if (clusterModelSemaphore != null) {
+        try {
+          clusterModelSemaphore.close();
+        } catch (Exception e) {
+          LOG.error("Received exception when closing auto closable semaphore", e);
+        }
+      }
       LOG.debug("Goal violation detection finished.");
+    }
+  }
+
+  private Set<String> excludedTopics(ClusterModel clusterModel) {
+    return clusterModel.topics()
+        .stream()
+        .filter(topic -> _excludedTopics.matcher(topic).matches())
+        .collect(Collectors.toSet());
+  }
+
+  private boolean optimizeForGoal(ClusterModel clusterModel,
+                                  int priority,
+                                  Goal goal,
+                                  GoalViolations goalViolations)
+      throws KafkaCruiseControlException {
+    if (clusterModel.topics().isEmpty()) {
+      LOG.info("Skipping goal violation detection because the cluster model does not have any topic.");
+      return false;
+    }
+    Map<TopicPartition, List<Integer>> initDistribution = clusterModel.getReplicaDistribution();
+    goal.optimize(clusterModel, new HashSet<>(), excludedTopics(clusterModel));
+    Set<BalancingProposal> proposals = AnalyzerUtils.getDiff(initDistribution, clusterModel);
+    LOG.trace("{} generated {} proposals", goal.name(), proposals.size());
+    if (!proposals.isEmpty()) {
+      goalViolations.addViolation(priority, goal.name(), proposals);
+      return true;
+    } else {
+      return false;
     }
   }
 }

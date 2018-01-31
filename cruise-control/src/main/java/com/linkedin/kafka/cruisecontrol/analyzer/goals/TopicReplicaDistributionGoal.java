@@ -18,13 +18,16 @@ import com.linkedin.kafka.cruisecontrol.model.Replica;
 
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils.EPSILON;
 
@@ -35,6 +38,8 @@ import static com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils.EPSILON;
  * SOFT GOAL#2: Balance collocations of replicas of the same topic.
  */
 public class TopicReplicaDistributionGoal extends AbstractGoal {
+  private static final Logger LOG = LoggerFactory.getLogger(TopicReplicaDistributionGoal.class);
+
   private Map<String, ReplicaDistributionTarget> _replicaDistributionTargetByTopic;
   private String _currentRebalanceTopic;
   private List<String> _topicsToRebalance;
@@ -94,9 +99,16 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
    * they contain.
    */
   @Override
-  protected Collection<Broker> brokersToBalance(ClusterModel clusterModel) {
+  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
+    if (!clusterModel.deadBrokers().isEmpty()) {
+      return clusterModel.deadBrokers();
+    }
+
+    if (_currentRebalanceTopic == null) {
+      return Collections.emptySortedSet();
+    }
     // Brokers having over minimum number of replicas per broker for the current rebalance topic are eligible for balancing.
-    Set<Broker> brokersToBalance = new HashSet<>();
+    SortedSet<Broker> brokersToBalance = new TreeSet<>();
     int minNumReplicasPerBroker = _replicaDistributionTargetByTopic.get(_currentRebalanceTopic).minNumReplicasPerBroker();
     brokersToBalance.addAll(clusterModel.brokers().stream()
         .filter(broker -> broker.replicasOfTopicInBroker(_currentRebalanceTopic).size() > minNumReplicasPerBroker)
@@ -120,21 +132,32 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
   }
 
   /**
-   * Initiates replica distribution target for each topic in the given cluster.
+   * Initiates replica distribution target for each non-excluded topic in the given cluster.
    *
    * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics that should be excluded from the optimization proposals.
    */
   @Override
-  protected void initGoalState(ClusterModel clusterModel)
+  protected void initGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException {
     _numRebalancedTopics = 0;
     _topicsToRebalance = new ArrayList<>(clusterModel.topics());
-    _currentRebalanceTopic = _topicsToRebalance.get(_numRebalancedTopics);
+    if (clusterModel.deadBrokers().isEmpty()) {
+      _topicsToRebalance.removeAll(excludedTopics);
+    }
+
+    if (_topicsToRebalance.isEmpty()) {
+      LOG.warn("All topics are excluded from {}.", name());
+      _currentRebalanceTopic = null;
+    } else {
+      _currentRebalanceTopic = _topicsToRebalance.get(_numRebalancedTopics);
+    }
+
     _replicaDistributionTargetByTopic = new HashMap<>();
 
     Set<Broker> brokers = clusterModel.healthyBrokers();
-    // Populate a map of replica distribution target by each topic in the cluster.
-    for (String topic : clusterModel.topics()) {
+    // Populate a map of replica distribution target by each non-excluded topic in the cluster.
+    for (String topic : _topicsToRebalance) {
       ReplicaDistributionTarget replicaDistributionTarget =
           new ReplicaDistributionTarget(clusterModel.numTopicReplicas(topic), brokers);
       for (Broker broker : brokers) {
@@ -151,7 +174,7 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
    * @param clusterModel The state of the cluster.
    */
   @Override
-  protected void updateGoalState(ClusterModel clusterModel)
+  protected void updateGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException {
 
     if (!clusterModel.selfHealingEligibleReplicas().isEmpty()) {
@@ -163,7 +186,7 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
         }
       }
       finish();   // Finish self healing.
-    } else if (++_numRebalancedTopics == _topicsToRebalance.size()) {
+    } else if (_currentRebalanceTopic == null || ++_numRebalancedTopics == _topicsToRebalance.size()) {
       finish();   // Finish rebalance.
     } else {
       // Set the current topic to rebalance.
@@ -206,12 +229,13 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
     if (!clusterModel.selfHealingEligibleReplicas().isEmpty() && !broker.isAlive() && !broker.replicas().isEmpty()) {
       healCluster(clusterModel, optimizedGoals);
     } else {
-      Set<Replica> topicReplicasInBroker = new HashSet<>(broker.replicasOfTopicInBroker(_currentRebalanceTopic));
+      SortedSet<Replica> topicReplicasInBroker = new TreeSet<>(broker.replicasOfTopicInBroker(_currentRebalanceTopic));
       // Move local topic replicas to eligible brokers.
       _replicaDistributionTargetByTopic.get(_currentRebalanceTopic)
-                                       .moveReplicasInSourceBrokerToEligibleBrokers(
-                                           clusterModel, topicReplicasInBroker,
-                                           optimizedGoals, excludedTopics);
+                                       .moveReplicasInSourceBrokerToEligibleBrokers(clusterModel,
+                                                                                    topicReplicasInBroker,
+                                                                                    optimizedGoals,
+                                                                                    excludedTopics);
     }
   }
 

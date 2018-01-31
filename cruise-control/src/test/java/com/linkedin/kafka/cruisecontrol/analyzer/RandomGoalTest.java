@@ -5,13 +5,19 @@
 package com.linkedin.kafka.cruisecontrol.analyzer;
 
 import com.linkedin.kafka.cruisecontrol.CruiseControlUnitTestUtils;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoals;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareCapacityGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.PreferredLeaderElectionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
@@ -21,12 +27,14 @@ import com.linkedin.kafka.cruisecontrol.common.TestConstants;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import java.util.Properties;
 import java.util.Random;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -35,6 +43,7 @@ import org.junit.runners.Parameterized.Parameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.linkedin.kafka.cruisecontrol.analyzer.OptimizationVerifier.Verification.*;
 import static org.junit.Assert.assertTrue;
 
 
@@ -55,92 +64,116 @@ public class RandomGoalTest {
   @Parameters
   public static Collection<Object[]> data() throws Exception {
     int goalRepetition = 4;
-    Collection<Object[]> params = new ArrayList<>();
+    Collection<Object[]> p = new ArrayList<>();
 
-    Map<Integer, String> goalNameByPriority = new HashMap<>();
-    goalNameByPriority.put(1, RackAwareCapacityGoal.class.getName());
-    goalNameByPriority.put(2, PotentialNwOutGoal.class.getName());
-    goalNameByPriority.put(3, TopicReplicaDistributionGoal.class.getName());
-    goalNameByPriority.put(4, DiskUsageDistributionGoal.class.getName());
-    goalNameByPriority.put(5, NetworkInboundUsageDistributionGoal.class.getName());
-    goalNameByPriority.put(6, NetworkOutboundUsageDistributionGoal.class.getName());
-    goalNameByPriority.put(7, CpuUsageDistributionGoal.class.getName());
-    goalNameByPriority.put(8, LeaderBytesInDistributionGoals.class.getName());
-    goalNameByPriority.put(9, ReplicaDistributionGoal.class.getName());
+    List<String> goalsSortedByPriority = Arrays.asList(
+        RackAwareGoal.class.getName(),
+        ReplicaCapacityGoal.class.getName(),
+        CpuCapacityGoal.class.getName(),
+        DiskCapacityGoal.class.getName(),
+        NetworkInboundCapacityGoal.class.getName(),
+        NetworkOutboundCapacityGoal.class.getName(),
+        PotentialNwOutGoal.class.getName(),
+        TopicReplicaDistributionGoal.class.getName(),
+        DiskUsageDistributionGoal.class.getName(),
+        NetworkInboundUsageDistributionGoal.class.getName(),
+        NetworkOutboundUsageDistributionGoal.class.getName(),
+        CpuUsageDistributionGoal.class.getName(),
+        PreferredLeaderElectionGoal.class.getName(),
+        LeaderBytesInDistributionGoal.class.getName(),
+        ReplicaDistributionGoal.class.getName());
 
-    KafkaCruiseControlConfig config =
-        new KafkaCruiseControlConfig(CruiseControlUnitTestUtils.getCruiseControlProperties());
-    BalancingConstraint balancingConstraint = new BalancingConstraint(config);
+    Properties props = CruiseControlUnitTestUtils.getCruiseControlProperties();
+    props.setProperty(KafkaCruiseControlConfig.MAX_REPLICAS_PER_BROKER_CONFIG, Long.toString(1500L));
+    BalancingConstraint balancingConstraint = new BalancingConstraint(new KafkaCruiseControlConfig(props));
     balancingConstraint.setBalancePercentage(TestConstants.LOW_BALANCE_PERCENTAGE);
     balancingConstraint.setCapacityThreshold(TestConstants.MEDIUM_CAPACITY_THRESHOLD);
 
+    List<OptimizationVerifier.Verification> verifications = Arrays.asList(NEW_BROKERS, DEAD_BROKERS, REGRESSION);
+
     // Test: Single goal at a time.
-    for (Map.Entry<Integer, String> entry: goalNameByPriority.entrySet()) {
-      Map<Integer, String> singletonGoalNameByPriority = Collections.singletonMap(entry.getKey(), entry.getValue());
-      Object[] singleGoalParams = {Collections.emptyMap(), singletonGoalNameByPriority, balancingConstraint};
-      params.add(singleGoalParams);
+    int goalPriority = 1;
+    for (String goalName: goalsSortedByPriority) {
+      Map<Integer, String> singletonGoalNameByPriority = Collections.singletonMap(goalPriority, goalName);
+      p.add(params(Collections.emptyMap(), singletonGoalNameByPriority, balancingConstraint, verifications));
+      goalPriority++;
     }
 
     // Test: Consecutive repetition of the same goal (goalRepetition times each).
-    int goalPriority = 1;
-    for (String goalName : goalNameByPriority.values()) {
+    goalPriority = 1;
+    for (String goalName : goalsSortedByPriority) {
       Map<Integer, String> repeatedGoalNamesByPriority = new HashMap<>();
       for (int i = 0; i < goalRepetition; i++) {
         repeatedGoalNamesByPriority.put(goalPriority, goalName);
         goalPriority++;
       }
-      Object[] consecutiveRepetitionParams = {Collections.emptyMap(), repeatedGoalNamesByPriority, balancingConstraint};
-      params.add(consecutiveRepetitionParams);
+      p.add(params(Collections.emptyMap(), repeatedGoalNamesByPriority, balancingConstraint, verifications));
     }
+
     // Test: Nested repetition of the same goal (goalRepetition times each).
     goalPriority = 1;
     Map<Integer, String> nonRepetitiveGoalNamesByPriority = new HashMap<>();
     for (int i = 0; i < goalRepetition; i++) {
-      for (String goalName : goalNameByPriority.values()) {
+      for (String goalName : goalsSortedByPriority) {
         nonRepetitiveGoalNamesByPriority.put(goalPriority, goalName);
         goalPriority++;
       }
     }
-    Object[] nestedRepetitionParams = {Collections.emptyMap(), nonRepetitiveGoalNamesByPriority, balancingConstraint};
-    params.add(nestedRepetitionParams);
+    p.add(params(Collections.emptyMap(), nonRepetitiveGoalNamesByPriority, balancingConstraint, verifications));
 
     // Test: No goal.
-    Object[] noGoalParams = {Collections.emptyMap(), Collections.emptyMap(), balancingConstraint};
-    params.add(noGoalParams);
+    p.add(params(Collections.emptyMap(), Collections.emptyMap(), balancingConstraint, verifications));
 
     // Test shuffled soft goals.
-    List<String> shuffledSoftGoalNames = new ArrayList<>(goalNameByPriority.values());
-    shuffledSoftGoalNames.remove(RackAwareCapacityGoal.class.getName());    // Remove the hard goal.
+    List<String> shuffledSoftGoalNames = new ArrayList<>(goalsSortedByPriority);
+    // Remove the hard goals.
+    shuffledSoftGoalNames.remove(RackAwareGoal.class.getName());
+    shuffledSoftGoalNames.remove(ReplicaCapacityGoal.class.getName());
+    shuffledSoftGoalNames.remove(CpuCapacityGoal.class.getName());
+    shuffledSoftGoalNames.remove(DiskCapacityGoal.class.getName());
+    shuffledSoftGoalNames.remove(NetworkInboundCapacityGoal.class.getName());
+    shuffledSoftGoalNames.remove(NetworkOutboundCapacityGoal.class.getName());
     Collections.shuffle(shuffledSoftGoalNames, RANDOM);
 
-    int priority = 1;
+    goalPriority = 1;
     Map<Integer, String> randomOrderedSoftGoalsByPriority = new HashMap<>();
     for (String goalName : shuffledSoftGoalNames) {
-      randomOrderedSoftGoalsByPriority.put(priority, goalName);
-      priority++;
+      randomOrderedSoftGoalsByPriority.put(goalPriority, goalName);
+      goalPriority++;
     }
-    Object[] randomOrderedSoftGoalsParams = {Collections.emptyMap(), randomOrderedSoftGoalsByPriority, balancingConstraint};
-    params.add(randomOrderedSoftGoalsParams);
+    p.add(params(Collections.emptyMap(), randomOrderedSoftGoalsByPriority, balancingConstraint, verifications));
 
-    return params;
+    return p;
+  }
+
+  private static Object[] params(Map<ClusterProperty, Number> modifiedProperties,
+                                 Map<Integer, String> goalNameByPriority,
+                                 BalancingConstraint balancingConstraint,
+                                 List<OptimizationVerifier.Verification> verifications) {
+    return new Object[]{modifiedProperties, goalNameByPriority, balancingConstraint, verifications};
   }
 
   private Map<ClusterProperty, Number> _modifiedProperties;
   private Map<Integer, String> _goalNameByPriority;
   private BalancingConstraint _balancingConstraint;
+  private List<OptimizationVerifier.Verification> _verifications;
 
   /**
    * Constructor of Random Goal Test.
    *
    * @param modifiedProperties Modified cluster properties over the {@link TestConstants#BASE_PROPERTIES}.
    * @param goalNameByPriority Goal name by priority.
+   * @param balancingConstraint the balancing constraints.
+   * @param verifications the verifications to make.
    */
   public RandomGoalTest(Map<ClusterProperty, Number> modifiedProperties,
                         Map<Integer, String> goalNameByPriority,
-                        BalancingConstraint balancingConstraint) {
+                        BalancingConstraint balancingConstraint,
+                        List<OptimizationVerifier.Verification> verifications) {
     _modifiedProperties = modifiedProperties;
     _goalNameByPriority = goalNameByPriority;
     _balancingConstraint = balancingConstraint;
+    _verifications = verifications;
   }
 
   @Test
@@ -149,11 +182,11 @@ public class RandomGoalTest {
     Map<ClusterProperty, Number> clusterProperties = new HashMap<>(TestConstants.BASE_PROPERTIES);
     clusterProperties.putAll(_modifiedProperties);
 
-    LOG.debug("Replica distribution: {}.", TestConstants.Distribution.EXPONENTIAL);
+    LOG.debug("Replica distribution: {} || Goals: {}.", TestConstants.Distribution.EXPONENTIAL, _goalNameByPriority);
     ClusterModel clusterModel = RandomCluster.generate(clusterProperties);
     RandomCluster.populate(clusterModel, clusterProperties, TestConstants.Distribution.EXPONENTIAL);
 
     assertTrue("Random Goal Test failed to improve the existing state.",
-        OptimizationVerifier.executeGoalsFor(_balancingConstraint, clusterModel, _goalNameByPriority));
+        OptimizationVerifier.executeGoalsFor(_balancingConstraint, clusterModel, _goalNameByPriority, _verifications));
   }
 }

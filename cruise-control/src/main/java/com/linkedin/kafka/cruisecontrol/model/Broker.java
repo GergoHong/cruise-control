@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import org.apache.kafka.common.TopicPartition;
@@ -28,7 +29,7 @@ import org.apache.kafka.common.TopicPartition;
  * A class that holds the information of the broker, including its liveness and load for replicas. A broker object is
  * created as part of a rack structure.
  */
-public class Broker implements Serializable {
+public class Broker implements Serializable, Comparable<Broker> {
 
   public enum State {
     ALIVE, DEAD, NEW
@@ -44,7 +45,7 @@ public class Broker implements Serializable {
   /** A map for tracking topic -> (partitionId -> replica). */
   private final Map<String, Map<Integer, Replica>> _topicReplicas;
   private final Load _load;
-  private final Load _leadershipLoad;
+  private final Load _leadershipLoadForNwResources;
   private State _state;
 
   /**
@@ -67,12 +68,16 @@ public class Broker implements Serializable {
     _immigrantReplicas = new HashSet<>();
     // Initially broker does not contain any load.
     _load = Load.newLoad();
-    _leadershipLoad = Load.newLoad();
+    _leadershipLoadForNwResources = Load.newLoad();
     _state = State.ALIVE;
   }
 
   public Host host() {
     return _host;
+  }
+
+  public State getState() {
+    return _state;
   }
 
   /**
@@ -117,18 +122,25 @@ public class Broker implements Serializable {
   }
 
   /**
+   * Get the immigrant replicas (The replicas that are moved here).
+   */
+  public Set<Replica> immigrantReplicas() {
+    return _immigrantReplicas;
+  }
+
+  /**
    * Get the replica if it is in the broker.
    *
-   * @param topicPartition Topic partition of the replica.
+   * @param tp Topic partition of the replica.
    * @return Replica if it exists in the broker, null otherwise.
    */
-  public Replica replica(TopicPartition topicPartition) {
-    Map<Integer, Replica> topicReplicas = _topicReplicas.get(topicPartition.topic());
+  public Replica replica(TopicPartition tp) {
+    Map<Integer, Replica> topicReplicas = _topicReplicas.get(tp.topic());
     if (topicReplicas == null) {
       return null;
     }
 
-    return topicReplicas.get(topicPartition.partition());
+    return topicReplicas.get(tp.partition());
   }
 
   /**
@@ -165,12 +177,11 @@ public class Broker implements Serializable {
   }
 
   /**
-   +   * The load for the replicas for which this broker is a leader.  This is meaningful for things like network bytes in,
-   +   * but perhaps less meaningful for something like disk utilization.
-   +   * @return
-   +   */
-  public Load leadershipLoad() {
-    return _leadershipLoad;
+   * The load for the replicas for which this broker is a leader. This is meaningful for network bytes in, and
+   * network bytes out but not meaningful for the other resources.
+   */
+  public Load leadershipLoadForNwResources() {
+    return _leadershipLoadForNwResources;
   }
 
   /**
@@ -196,7 +207,10 @@ public class Broker implements Serializable {
     } else {
       candidateReplicas = _replicas;
     }
+    return sortedReplicas(resource, candidateReplicas);
+  }
 
+  private List<Replica> sortedReplicas(Resource resource, Set<Replica> candidateReplicas) {
     List<Replica> replicasToBeBalanced = new ArrayList<>();
     List<Replica> nativeReplicasToBeBalanced = new ArrayList<>();
     for (Replica replica : candidateReplicas) {
@@ -208,13 +222,17 @@ public class Broker implements Serializable {
     }
 
     Collections.sort(replicasToBeBalanced,
-                     (o1, o2) -> Double.compare(loadDensity(o2, resource),
-                                                loadDensity(o1, resource)));
+        (o1, o2) -> Double.compare(loadDensity(o2, resource),
+            loadDensity(o1, resource)));
     Collections.sort(nativeReplicasToBeBalanced,
-                     (o1, o2) -> Double.compare(loadDensity(o2, resource),
-                                                loadDensity(o1, resource)));
+        (o1, o2) -> Double.compare(loadDensity(o2, resource),
+            loadDensity(o1, resource)));
     replicasToBeBalanced.addAll(nativeReplicasToBeBalanced);
     return replicasToBeBalanced;
+  }
+
+  public List<Replica> sortedLeadersFor(Resource resource) {
+    return sortedReplicas(resource, _leaderReplicas);
   }
 
   /**
@@ -272,7 +290,7 @@ public class Broker implements Serializable {
 
     // Add leader replica.
     if (replica.isLeader()) {
-      _leadershipLoad.addLoad(replica.load());
+      _leadershipLoadForNwResources.addLoad(replica.load());
       _leaderReplicas.add(replica);
     }
 
@@ -281,17 +299,18 @@ public class Broker implements Serializable {
   }
 
   /**
-   * (1) Make the replica with the given topicPartition and brokerId a follower.
+   * (1) Make the replica with the given topic partition and brokerId a follower.
    * (2) Remove and get the outbound network load associated with leadership from the given replica.
+   * (3) Remove and get the CPU load associated with leadership from the given replica.
    *
-   * @param topicPartition TopicPartition of the replica for which the outbound network load will be removed.
+   * @param tp TopicPartition of the replica for which the outbound network load will be removed.
    * @return Leadership load by snapshot time.
    */
-  Map<Resource, Map<Long, Double>> makeFollower(TopicPartition topicPartition) throws ModelInputException {
-    Replica replica = replica(topicPartition);
-    _leadershipLoad.subtractLoad(replica.load());
+  Map<Resource, Map<Long, Double>> makeFollower(TopicPartition tp) throws ModelInputException {
+    Replica replica = replica(tp);
+    _leadershipLoadForNwResources.subtractLoad(replica.load());
 
-    Map<Resource, Map<Long, Double>> leadershipLoad = replica(topicPartition).makeFollower();
+    Map<Resource, Map<Long, Double>> leadershipLoad = replica(tp).makeFollower();
     // Remove leadership load from load.
     _load.subtractLoadFor(Resource.NW_OUT, leadershipLoad.get(Resource.NW_OUT));
     _load.subtractLoadFor(Resource.CPU, leadershipLoad.get(Resource.CPU));
@@ -300,33 +319,34 @@ public class Broker implements Serializable {
   }
 
   /**
-   * (1) Make the replica with the given topicPartition and brokerId the leader.
+   * (1) Make the replica with the given topic partition and brokerId the leader.
    * (2) Add the outbound network load associated with leadership to the given replica.
+   * (3) Add the CPU load associated with leadership.
    *
-   * @param topicPartition TopicPartition of the replica for which the outbound network load will be added.
-   * @param leadershipLoad Leadership load to be added by snapshot time.
+   * @param tp TopicPartition of the replica for which the outbound network load will be added.
+   * @param leadershipLoadBySnapshotTime Resource to leadership load to be added by snapshot time.
    */
-  void makeLeader(TopicPartition topicPartition,
-                  Map<Resource, Map<Long, Double>> leadershipLoad)
+  void makeLeader(TopicPartition tp,
+                  Map<Resource, Map<Long, Double>> leadershipLoadBySnapshotTime)
       throws ModelInputException {
-    Replica replica = replica(topicPartition);
-    replica.makeLeader(leadershipLoad);
-    _leadershipLoad.addLoad(replica.load());
+    Replica replica = replica(tp);
+    replica.makeLeader(leadershipLoadBySnapshotTime);
+    _leadershipLoadForNwResources.addLoad(replica.load());
     // Add leadership load to load.
-    _load.addLoadFor(Resource.NW_OUT, leadershipLoad.get(Resource.NW_OUT));
-    _load.addLoadFor(Resource.CPU, leadershipLoad.get(Resource.CPU));
+    _load.addLoadFor(Resource.NW_OUT, leadershipLoadBySnapshotTime.get(Resource.NW_OUT));
+    _load.addLoadFor(Resource.CPU, leadershipLoadBySnapshotTime.get(Resource.CPU));
     _leaderReplicas.add(replica);
   }
 
   /**
    * Get the removed replica from the broker.
    *
-   * @param topicPartition Topic partition of the replica to be removed from replicas in the current broker.
-   * @return The removed replica or null if the topicPartition is not present.
+   * @param tp Topic partition of the replica to be removed from replicas in the current broker.
+   * @return The removed replica or null if the topic partition is not present.
    */
-  Replica removeReplica(TopicPartition topicPartition) {
+  Replica removeReplica(TopicPartition tp) {
     // Find the index of the replica with the given replica ID and topic name.
-    Replica removedReplica = replica(topicPartition);
+    Replica removedReplica = replica(tp);
     if (removedReplica != null) {
       // Remove the replica from the list of replicas.
       _replicas.remove(removedReplica);
@@ -334,12 +354,12 @@ public class Broker implements Serializable {
       _load.subtractLoad(removedReplica.load());
 
       // Remove topic replica.
-      Map<Integer, Replica> topicReplicas = _topicReplicas.get(topicPartition.topic());
+      Map<Integer, Replica> topicReplicas = _topicReplicas.get(tp.topic());
       if (topicReplicas != null) {
-        topicReplicas.remove(topicPartition.partition());
+        topicReplicas.remove(tp.partition());
       }
       if (removedReplica.isLeader()) {
-        _leadershipLoad.subtractLoad(removedReplica.load());
+        _leadershipLoadForNwResources.subtractLoad(removedReplica.load());
         _leaderReplicas.remove(removedReplica);
       }
       _immigrantReplicas.remove(removedReplica);
@@ -364,25 +384,41 @@ public class Broker implements Serializable {
     _topicReplicas.clear();
     _immigrantReplicas.clear();
     _load.clearLoad();
-    _leadershipLoad.clearLoad();
+    _leadershipLoadForNwResources.clearLoad();
   }
 
   /**
    * Push the latest snapshot information containing the snapshot time and resource loads to the replica identified
-   * by its topicPartition.
+   * by its topic partition.
    *
-   * @param topicPartition Topic partition that identifies the replica in this broker.
+   * @param tp Topic partition that identifies the replica in this broker.
    * @param snapshot       Snapshot containing the latest state for each resource.
    * @throws ModelInputException
    */
-  void pushLatestSnapshot(TopicPartition topicPartition, Snapshot snapshot)
+  void pushLatestSnapshot(TopicPartition tp, Snapshot snapshot)
       throws ModelInputException {
-    Replica replica = replica(topicPartition);
+    Replica replica = replica(tp);
     replica.pushLatestSnapshot(snapshot);
     if (replica.isLeader()) {
-      _leadershipLoad.addSnapshot(snapshot);
+      _leadershipLoadForNwResources.addSnapshot(snapshot);
     }
     _load.addSnapshot(snapshot);
+  }
+
+  /*
+   * Return an object that can be further used
+   * to encode into JSON
+   */
+  public Map<String, Object> getJsonStructure() {
+    List<Map<String, Object>> replicaList = new ArrayList<>();
+    for (Replica replica : _replicas) {
+      replicaList.add(replica.getJsonStructureForLoad());
+    }
+    Map<String, Object> brokerMap = new HashMap<>();
+    brokerMap.put("brokerid", _id);
+    brokerMap.put("brokerstate", _state);
+    brokerMap.put("replicas", replicaList);
+    return brokerMap;
   }
 
   /**
@@ -400,8 +436,31 @@ public class Broker implements Serializable {
 
   @Override
   public String toString() {
-    StringBuilder bldr = new StringBuilder();
-    bldr.append("Broker[id=").append(_id).append(",state=").append(_state).append(",replicaCount=").append(_replicas.size()).append(']');
-    return bldr.toString();
+    return String.format("Broker[id=%d,rack=%s,state=%s,replicaCount=%d]", _id, rack().id(), _state, _replicas.size());
+  }
+
+  /**
+   * Compare by broker id.
+   */
+  @Override
+  public int compareTo(Broker o) {
+    return Integer.compare(_id, o.id());
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    Broker broker = (Broker) o;
+    return _id == broker._id;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(_id);
   }
 }

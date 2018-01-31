@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.kafka.common.TopicPartition;
@@ -134,12 +136,16 @@ public class Host implements Serializable {
     Broker broker = broker(brokerId);
     if (broker.isAlive() && newState == Broker.State.DEAD) {
       for (Resource r : Resource.values()) {
-        _hostCapacity[r.id()] -= broker.capacityFor(r);
+        if (!r.isHostResource()) {
+          _hostCapacity[r.id()] -= broker.capacityFor(r);
+        }
       }
       _aliveBrokers--;
     } else if (!broker.isAlive() && newState != Broker.State.DEAD) {
       for (Resource r : Resource.values()) {
-        _hostCapacity[r.id()] += broker.capacityFor(r);
+        if (!r.isHostResource()) {
+          _hostCapacity[r.id()] += broker.capacityFor(r);
+        }
       }
       _aliveBrokers++;
     }
@@ -155,7 +161,7 @@ public class Host implements Serializable {
   Replica removeReplica(int brokerId, TopicPartition tp) {
     Broker broker = _brokers.get(brokerId);
     if (broker == null) {
-      throw new IllegalStateException(String.format("Cannot remove replica for %s from broker broker %s because "
+      throw new IllegalStateException(String.format("Cannot remove replica for %s from broker %s because "
                                                         + "it does not exist in host %s", tp, brokerId, _name));
     }
     Replica replica = broker.removeReplica(tp);
@@ -178,6 +184,15 @@ public class Host implements Serializable {
     return leadershipLoad;
   }
 
+  /**
+   * (1) Make the replica with the given topic partition and brokerId the leader.
+   * (2) Add the outbound network load associated with leadership to the given replica.
+   * (3) Add the CPU load associated with leadership.
+   *
+   * @param brokerId Id of the broker containing the replica.
+   * @param tp TopicPartition of the replica for which the outbound network load will be added.
+   * @param leadershipLoadBySnapshotTime Resource to leadership load to be added by snapshot time.
+   */
   void makeLeader(int brokerId,
                   TopicPartition tp,
                   Map<Resource, Map<Long, Double>> leadershipLoadBySnapshotTime) throws ModelInputException {
@@ -200,6 +215,22 @@ public class Host implements Serializable {
     _brokers.values().forEach(Broker::clearLoad);
     _load.clearLoad();
   }
+
+  /*
+   * Return an object that can be further used
+   * to encode into JSON
+   */
+  public Map<String, Object> getJsonStructure() {
+    Map<String, Object> hostMap = new HashMap<>();
+    List<Map<String, Object>> brokerList = new ArrayList<>();
+    for (Broker broker : _brokers.values()) {
+      brokerList.add(broker.getJsonStructure());
+    }
+    hostMap.put("name", _name);
+    hostMap.put("brokers", brokerList);
+    return hostMap;
+  }
+
 
   public void writeTo(OutputStream out) throws IOException {
     String host = String.format("<Host name=\"%s\">%n", _name);

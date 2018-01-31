@@ -36,6 +36,7 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
@@ -55,6 +56,7 @@ public class KafkaSampleStore implements SampleStore {
   public static final String NUM_SAMPLE_LOADING_THREADS = "num.sample.loading.threads";
   protected static final String PRODUCER_CLIENT_ID = "KafkaCruiseControlSampleStoreProducer";
   protected static final String CONSUMER_CLIENT_ID = "KafkaCruiseControlSampleStoreConsumer";
+  private static final String DEFAULT_CLEANUP_POLICY = "delete";
   // Keep additional snapshot windows in case some of the windows do not have enough samples.
   private static final int ADDITIONAL_SNAPSHOT_WINDOW_TO_RETAIN_FACTOR = 2;
   private static final ConsumerRecords<byte[], byte[]> SHUTDOWN_RECORDS = new ConsumerRecords<>(Collections.emptyMap());
@@ -86,6 +88,7 @@ public class KafkaSampleStore implements SampleStore {
       _consumers.add(createConsumers(config));
     }
     Properties producerProps = new Properties();
+    producerProps.putAll(config);
     producerProps.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
                               (String) config.get(KafkaCruiseControlConfig.BOOTSTRAP_SERVERS_CONFIG));
     producerProps.setProperty(ProducerConfig.CLIENT_ID_CONFIG, PRODUCER_CLIENT_ID);
@@ -96,7 +99,6 @@ public class KafkaSampleStore implements SampleStore {
     producerProps.setProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG, "gzip");
     producerProps.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
     producerProps.setProperty(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-    KafkaCruiseControlUtils.setSslConfigs(producerProps, config);
     _producer = new KafkaProducer<>(producerProps);
 
     _loadingProgress = -1.0;
@@ -106,17 +108,17 @@ public class KafkaSampleStore implements SampleStore {
 
   protected KafkaConsumer<byte[], byte[]> createConsumers(Map<String, ?> config) {
       Properties consumerProps = new Properties();
+      consumerProps.putAll(config);
       long randomToken = RANDOM.nextLong();
       consumerProps.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
                                 (String) config.get(KafkaCruiseControlConfig.BOOTSTRAP_SERVERS_CONFIG));
       consumerProps.setProperty(ConsumerConfig.GROUP_ID_CONFIG, "LiKafkaCruiseControlSampleStore" + randomToken);
       consumerProps.setProperty(ConsumerConfig.CLIENT_ID_CONFIG, CONSUMER_CLIENT_ID + randomToken);
-      consumerProps.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
+      consumerProps.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
       consumerProps.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
       consumerProps.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(Integer.MAX_VALUE));
       consumerProps.setProperty(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
       consumerProps.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-      KafkaCruiseControlUtils.setSslConfigs(consumerProps, config);
       return new KafkaConsumer<>(consumerProps);
   }
 
@@ -128,6 +130,7 @@ public class KafkaSampleStore implements SampleStore {
     long retentionMs = (numSnapshotWindows * ADDITIONAL_SNAPSHOT_WINDOW_TO_RETAIN_FACTOR) * snapshotWindowMs;
     Properties props = new Properties();
     props.setProperty(LogConfig.RetentionMsProp(), Long.toString(retentionMs));
+    props.setProperty(LogConfig.CleanupPolicyProp(), DEFAULT_CLEANUP_POLICY);
     int replicationFactor = Math.min(2, zkUtils.getAllBrokersInCluster().size());
     if (!topics.containsKey(_partitionMetricSampleStoreTopic)) {
       AdminUtils.createTopic(zkUtils, _partitionMetricSampleStoreTopic, 32, replicationFactor, props, RackAwareMode.Safe$.MODULE$);
@@ -311,9 +314,22 @@ public class KafkaSampleStore implements SampleStore {
             }
             _sampleLoader.loadSamples(new MetricSampler.Samples(partitionMetricSamples, brokerMetricSamples));
             _loadingProgress = (double) _numLoadedSamples.addAndGet(consumerRecords.count()) / _totalSamples.get();
+          } catch (KafkaException ke) {
+            if (ke.getMessage().toLowerCase().contains("record is corrupt")) {
+              for (TopicPartition tp : _consumer.assignment()) {
+                long position = _consumer.position(tp);
+                if (position < endOffsets.get(tp)) {
+                  _consumer.seek(tp, position + 1);
+                }
+              }
+            } else {
+              LOG.error("Metric loader received exception:", ke);
+            }
           } catch (Exception e) {
             if (_shutdown) {
               return;
+            } else {
+              LOG.error("Metric loader received exception:", e);
             }
           }
         }

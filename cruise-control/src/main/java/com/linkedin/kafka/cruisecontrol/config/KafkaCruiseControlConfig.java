@@ -4,26 +4,34 @@
 
 package com.linkedin.kafka.cruisecontrol.config;
 
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoals;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareCapacityGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.detector.notifier.NoopNotifier;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.CruiseControlMetricsReporterSampler;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.DefaultMetricSamplerPartitionAssignor;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.KafkaSampleStore;
-import java.util.Arrays;
-import joptsimple.internal.Strings;
+import java.util.List;
+import java.util.Set;
+import java.util.StringJoiner;
+import java.util.TreeSet;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 
 import java.util.Map;
+import org.apache.kafka.common.config.ConfigException;
 
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
 import static org.apache.kafka.common.config.ConfigDef.Range.between;
@@ -300,7 +308,7 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
    * <code>max.proposal.candidates</code>
    */
   public static final String MAX_PROPOSAL_CANDIDATES_CONFIG = "max.proposal.candidates";
-  private static final String MAX_PROPOSAL_CANDIDATES_DOC = "Kafka cruise control precomputes the optimization proposal"
+  private static final String MAX_PROPOSAL_CANDIDATES_DOC = "Kafka Cruise Control precomputes the optimization proposal"
       + "candidates continuously in the background. This config sets the maximum number of candidate proposals to "
       + "precompute for each cluster workload model. The more proposal candidates are generated, the more likely a "
       + "better optimization proposal will be found, but more CPU will be used as well.";
@@ -309,10 +317,18 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
    * <code>proposal.expiration.ms</code>
    */
   public static final String PROPOSAL_EXPIRATION_MS_CONFIG = "proposal.expiration.ms";
-  private static final String PROPOSAL_EXPIRATION_MS_DOC = "Kafka cruise control will cache one of the best proposal "
+  private static final String PROPOSAL_EXPIRATION_MS_DOC = "Kafka Cruise Control will cache one of the best proposal "
       + "among all the optimization proposal candidates it recently computed. This configuration defines when will the"
-      + "cached proposal be invalidated and needs a recomputation. If proposal.expiration.ms is set to 0, cruise control"
+      + "cached proposal be invalidated and needs a recomputation. If proposal.expiration.ms is set to 0, Cruise Control"
       + "will continuously compute the proposal candidates.";
+
+  /**
+   * <code>max.replicas.per.broker</code>
+   */
+  public static final String MAX_REPLICAS_PER_BROKER_CONFIG = "max.replicas.per.broker";
+  private static final String MAX_REPLICAS_PER_BROKER_DOC = "The maximum number of replicas allowed to reside on a "
+      + "broker. The analyzer will enforce a hard goal that the number of replica on a broker cannot be higher than "
+      + "this config.";
 
   /**
    * <code>num.proposal.precompute.threads</code>
@@ -358,8 +374,16 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
    * <code>goals</code>
    */
   public static final String GOALS_CONFIG = "goals";
-  private static final String GOALS_DOC = "A list of goals in the order of priority. The high priority goals will be " +
-      "executed first.";
+  private static final String GOALS_DOC = "A list of case insensitive goals in the order of priority. The high "
+      + "priority goals will be executed first.";
+
+  /**
+   * <code>default.gaols</code>
+   */
+  public static final String DEFAULT_GOALS_CONFIG = "default.goals";
+  private static final String DEFAULT_GOALS_DOC = "The list of goals that will be used by default if no goal list "
+      + "is provided. This list of goal will also be used for proposal pre-computation. If default.goals is not "
+      + "specified, it will be default to goals config.";
 
   /**
    * <code>anomaly.notifier.class</code>
@@ -608,6 +632,12 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
                 atLeast(0),
                 ConfigDef.Importance.MEDIUM,
                 PROPOSAL_EXPIRATION_MS_DOC)
+        .define(MAX_REPLICAS_PER_BROKER_CONFIG,
+            ConfigDef.Type.LONG,
+            10000,
+            atLeast(0),
+            ConfigDef.Importance.MEDIUM,
+            MAX_REPLICAS_PER_BROKER_DOC)
         .define(NUM_PROPOSAL_PRECOMPUTE_THREADS_CONFIG,
                 ConfigDef.Type.INT,
                 1,
@@ -635,17 +665,28 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
                 EXECUTION_PROGRESS_CHECK_INTERVAL_MS_DOC)
         .define(GOALS_CONFIG,
                 ConfigDef.Type.LIST,
-                Strings.join(Arrays.asList(RackAwareCapacityGoal.class.getName(),
-                                           PotentialNwOutGoal.class.getName(),
-                                           DiskUsageDistributionGoal.class.getName(),
-                                           NetworkInboundUsageDistributionGoal.class.getName(),
-                                           NetworkOutboundUsageDistributionGoal.class.getName(),
-                                           CpuUsageDistributionGoal.class.getName(),
-                                           LeaderBytesInDistributionGoals.class.getName(),
-                                           TopicReplicaDistributionGoal.class.getName(),
-                                           ReplicaDistributionGoal.class.getName()), ","),
+                new StringJoiner(",")
+                    .add(RackAwareGoal.class.getName())
+                    .add(ReplicaCapacityGoal.class.getName())
+                    .add(CpuCapacityGoal.class.getName())
+                    .add(DiskCapacityGoal.class.getName())
+                    .add(NetworkInboundCapacityGoal.class.getName())
+                    .add(NetworkOutboundCapacityGoal.class.getName())
+                    .add(PotentialNwOutGoal.class.getName())
+                    .add(DiskUsageDistributionGoal.class.getName())
+                    .add(NetworkInboundUsageDistributionGoal.class.getName())
+                    .add(NetworkOutboundUsageDistributionGoal.class.getName())
+                    .add(CpuUsageDistributionGoal.class.getName())
+                    .add(LeaderBytesInDistributionGoal.class.getName())
+                    .add(TopicReplicaDistributionGoal.class.getName())
+                    .add(ReplicaDistributionGoal.class.getName()).toString(),
                 ConfigDef.Importance.HIGH,
                 GOALS_DOC)
+        .define(DEFAULT_GOALS_CONFIG,
+                ConfigDef.Type.LIST,
+                "",
+                ConfigDef.Importance.MEDIUM,
+                DEFAULT_GOALS_DOC)
         .define(ANOMALY_NOTIFIER_CLASS_CONFIG,
                 ConfigDef.Type.CLASS,
                 DEFAULT_ANOMALY_NOTIFIER_CLASS,
@@ -657,15 +698,21 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
                 ANOMALY_DETECTION_INTERVAL_MS_DOC)
         .define(ANOMALY_DETECTION_GOALS_CONFIG,
                 ConfigDef.Type.LIST,
-                Strings.join(Arrays.asList(RackAwareCapacityGoal.class.getName(),
-                                           PotentialNwOutGoal.class.getName(),
-                                           DiskUsageDistributionGoal.class.getName(),
-                                           NetworkInboundUsageDistributionGoal.class.getName(),
-                                           NetworkOutboundUsageDistributionGoal.class.getName(),
-                                           CpuUsageDistributionGoal.class.getName(),
-                                           LeaderBytesInDistributionGoals.class.getName(),
-                                           TopicReplicaDistributionGoal.class.getName(),
-                                           ReplicaDistributionGoal.class.getName()), ","),
+                new StringJoiner(",")
+                    .add(RackAwareGoal.class.getName())
+                    .add(ReplicaCapacityGoal.class.getName())
+                    .add(CpuCapacityGoal.class.getName())
+                    .add(DiskCapacityGoal.class.getName())
+                    .add(NetworkInboundCapacityGoal.class.getName())
+                    .add(NetworkOutboundCapacityGoal.class.getName())
+                    .add(PotentialNwOutGoal.class.getName())
+                    .add(DiskUsageDistributionGoal.class.getName())
+                    .add(NetworkInboundUsageDistributionGoal.class.getName())
+                    .add(NetworkOutboundUsageDistributionGoal.class.getName())
+                    .add(CpuUsageDistributionGoal.class.getName())
+                    .add(LeaderBytesInDistributionGoal.class.getName())
+                    .add(TopicReplicaDistributionGoal.class.getName())
+                    .add(ReplicaDistributionGoal.class.getName()).toString(),
                 ConfigDef.Importance.MEDIUM,
                 ANOMALY_DETECTION_GOALS_DOC)
         .define(FAILED_BROKERS_ZK_PATH_CONFIG,
@@ -687,14 +734,30 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
                 KafkaSampleStore.class.getName(),
                 ConfigDef.Importance.LOW,
                 SAMPLE_STORE_CLASS_DOC)
-        .withClientSslSupport();
+        .withClientSslSupport()
+        .withClientSaslSupport();
+  }
+
+  /**
+   * Sanity check for case insensitive goal names.
+   */
+  private void sanityCheckGoalNames() {
+    List<String> goalNames = getList(KafkaCruiseControlConfig.GOALS_CONFIG);
+    Set<String> caseInsensitiveGoalNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    for (String goalName: goalNames) {
+      if (!caseInsensitiveGoalNames.add(goalName.replaceAll(".*\\.", ""))) {
+        throw new ConfigException("Attempt to configure goals with case sensitive names.");
+      }
+    }
   }
 
   public KafkaCruiseControlConfig(Map<?, ?> originals) {
     super(CONFIG, originals);
+    sanityCheckGoalNames();
   }
 
   public KafkaCruiseControlConfig(Map<?, ?> originals, boolean doLog) {
-    super(CONFIG, originals, false);
+    super(CONFIG, originals, doLog);
+    sanityCheckGoalNames();
   }
 }

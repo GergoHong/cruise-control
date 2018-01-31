@@ -23,6 +23,37 @@ public class DeterministicCluster {
 
   }
 
+  // Two racks, three brokers, one partition, two replicas
+  public static ClusterModel rackAwareSatisfiable() throws AnalysisInputException, ModelInputException {
+    List<Integer> orderedRackIdsOfBrokers = Arrays.asList(0, 0, 1);
+    ClusterModel cluster = DeterministicCluster.getHomogeneousDeterministicCluster(2, orderedRackIdsOfBrokers,
+                                                                                   TestConstants.BROKER_CAPACITY);
+
+    // Create topic partition.
+    TopicPartition pInfoT10 = new TopicPartition("T1", 0);
+
+    // Create replicas for topic: T1.
+    cluster.createReplica("0", 0, pInfoT10, 0, true);
+    cluster.createReplica("0", 1, pInfoT10, 1, false);
+
+    // Create snapshots and push them to the cluster.
+    cluster.pushLatestSnapshot("0", 0, pInfoT10, new Snapshot(1L, 100.0, 100.0, 130.0, 75.0));
+    cluster.pushLatestSnapshot("0", 1, pInfoT10, new Snapshot(1L, 5.0, 100.0, 0.0, 75.0));
+
+    return cluster;
+  }
+
+  // two racks, three brokers, one partition, three replicas.
+  public static ClusterModel rackAwareUnsatisfiable() throws AnalysisInputException, ModelInputException {
+    ClusterModel cluster = rackAwareSatisfiable();
+    TopicPartition pInfoT10 = new TopicPartition("T1", 0);
+
+    cluster.createReplica("1", 2, pInfoT10, 2, false);
+    cluster.pushLatestSnapshot("1", 2, pInfoT10, new Snapshot(1L, 100.0, 100.0, 130.0, 75.0));
+
+    return cluster;
+  }
+
   /**
    * Generates a small scale cluster.
    * <p>
@@ -126,17 +157,17 @@ public class DeterministicCluster {
     TopicPartition pInfoT21 = new TopicPartition("T2", 1);
     TopicPartition pInfoT22 = new TopicPartition("T2", 2);
     // Create replicas for topic: T1.
-    cluster.createReplica("0", 0, pInfoT10, true);
-    cluster.createReplica("1", 2, pInfoT10, false);
-    cluster.createReplica("0", 1, pInfoT11, true);
-    cluster.createReplica("0", 0, pInfoT11, false);
+    cluster.createReplica("0", 0, pInfoT10, 0, true);
+    cluster.createReplica("1", 2, pInfoT10, 1, false);
+    cluster.createReplica("0", 1, pInfoT11, 0, true);
+    cluster.createReplica("0", 0, pInfoT11, 1, false);
     // Create replicas for topic: T2.
-    cluster.createReplica("0", 1, pInfoT20, true);
-    cluster.createReplica("1", 2, pInfoT20, false);
-    cluster.createReplica("0", 0, pInfoT21, true);
-    cluster.createReplica("1", 2, pInfoT21, false);
-    cluster.createReplica("0", 0, pInfoT22, true);
-    cluster.createReplica("0", 1, pInfoT22, false);
+    cluster.createReplica("0", 1, pInfoT20, 0, true);
+    cluster.createReplica("1", 2, pInfoT20, 1, false);
+    cluster.createReplica("0", 0, pInfoT21, 0, true);
+    cluster.createReplica("1", 2, pInfoT21, 1, false);
+    cluster.createReplica("0", 0, pInfoT22, 0, true);
+    cluster.createReplica("0", 1, pInfoT22, 1, false);
 
     // Create snapshots and push them to the cluster.
     cluster.pushLatestSnapshot("0", 0, pInfoT10, new Snapshot(1L, 100.0, 100.0, 130.0, 75.0));
@@ -178,21 +209,21 @@ public class DeterministicCluster {
     TopicPartition pInfoD0 = new TopicPartition("D", 0);
 
     // Create replicas for TopicA.
-    cluster.createReplica("0", 1, pInfoA0, true);
-    cluster.createReplica("0", 0, pInfoA0, false);
-    cluster.createReplica("0", 0, pInfoA1, true);
-    cluster.createReplica("1", 2, pInfoA1, false);
-    cluster.createReplica("0", 0, pInfoA2, true);
-    cluster.createReplica("1", 2, pInfoA2, false);
+    cluster.createReplica("0", 1, pInfoA0, 0, true);
+    cluster.createReplica("0", 0, pInfoA0, 1, false);
+    cluster.createReplica("0", 0, pInfoA1, 0, true);
+    cluster.createReplica("1", 2, pInfoA1, 1, false);
+    cluster.createReplica("0", 0, pInfoA2, 0, true);
+    cluster.createReplica("1", 2, pInfoA2, 1, false);
     // Create replicas for TopicB.
-    cluster.createReplica("0", 1, pInfoB0, true);
-    cluster.createReplica("1", 2, pInfoB0, false);
+    cluster.createReplica("0", 1, pInfoB0, 0, true);
+    cluster.createReplica("1", 2, pInfoB0, 1, false);
     // Create replicas for TopicC.
-    cluster.createReplica("1", 2, pInfoC0, true);
-    cluster.createReplica("0", 1, pInfoC0, false);
+    cluster.createReplica("1", 2, pInfoC0, 0, true);
+    cluster.createReplica("0", 1, pInfoC0, 1, false);
     // Create replicas for TopicD.
-    cluster.createReplica("0", 1, pInfoD0, true);
-    cluster.createReplica("1", 2, pInfoD0, false);
+    cluster.createReplica("0", 1, pInfoD0, 0, true);
+    cluster.createReplica("1", 2, pInfoD0, 1, false);
 
     // Create snapshots and push them to the cluster.
     cluster.pushLatestSnapshot("0", 0, pInfoA0, new Snapshot(1L, 5.0, 5.0, 0.0, 4.0));
@@ -220,9 +251,9 @@ public class DeterministicCluster {
    * @return Cluster with the specified number of racks and broker distribution.
    * @throws AnalysisInputException
    */
-  private static ClusterModel getHomogeneousDeterministicCluster(int numRacks,
-                                                                 List<Integer> orderedRackIdsOfBrokers,
-                                                                 Map<Resource, Double> brokerCapacity)
+  public static ClusterModel getHomogeneousDeterministicCluster(int numRacks,
+                                                                List<Integer> orderedRackIdsOfBrokers,
+                                                                Map<Resource, Double> brokerCapacity)
       throws AnalysisInputException {
     int numBrokers = orderedRackIdsOfBrokers.size();
     // Sanity checks.

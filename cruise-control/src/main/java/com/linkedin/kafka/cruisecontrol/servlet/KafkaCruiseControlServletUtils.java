@@ -13,7 +13,7 @@ import javax.servlet.http.HttpServletRequest;
 /**
  * The util class for Kafka Cruise Control servlet.
  */
-public class KafkaCruiseControlServletUtils {
+class KafkaCruiseControlServletUtils {
 
   private KafkaCruiseControlServletUtils() {
 
@@ -33,7 +33,7 @@ public class KafkaCruiseControlServletUtils {
     "REMOTE_ADDR"
   };
 
-  public static String getClientIpAddress(HttpServletRequest request) {
+  static String getClientIpAddress(HttpServletRequest request) {
     for (String header : HEADERS_TO_TRY) {
       String ip = request.getHeader(header);
       if (ip != null && ip.length() != 0 && !"unknown".equalsIgnoreCase(ip)) {
@@ -43,7 +43,7 @@ public class KafkaCruiseControlServletUtils {
     return request.getRemoteAddr();
   }
 
-  public static String getProposalSummary(GoalOptimizer.OptimizerResult result) {
+  static String getProposalSummary(GoalOptimizer.OptimizerResult result) {
     int numReplicaMovements = 0;
     int numLeaderMovements = 0;
     long dataToMove = 0;
@@ -56,8 +56,8 @@ public class KafkaCruiseControlServletUtils {
       }
     }
     return String.format("%n%nThe optimization proposal has %d replica(%d MB) movements and %d leadership movements "
-                             + "based on the cluster model with %d recent snapshot windows and %.3f%% valid monitored"
-                             + "partitions", numReplicaMovements, dataToMove, numLeaderMovements,
+                             + "based on the cluster model with %d recent snapshot windows and %.3f%% of the partitions "
+                             + "covered.", numReplicaMovements, dataToMove, numLeaderMovements,
                          result.clusterModelStats().numSnapshotWindows(),
                          result.clusterModelStats().monitoredPartitionsPercentage() * 100);
   }

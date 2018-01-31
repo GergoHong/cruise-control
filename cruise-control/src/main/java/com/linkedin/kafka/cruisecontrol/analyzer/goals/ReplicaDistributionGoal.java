@@ -17,22 +17,26 @@ import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
-import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.common.TopicPartition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
  * Class for achieving the following soft goal:
  * <p>
- * SOFT GOAL#4: Distribute partitions (independent of their topics) evenly over brokers.
+ * SOFT GOAL#4: Distribute replicas evenly over brokers. This distribution is independent of topics, but excludes
+ * replicas of excluded topics.
  */
 public class ReplicaDistributionGoal extends AbstractGoal {
+  private static final Logger LOG = LoggerFactory.getLogger(ReplicaDistributionGoal.class);
   private ReplicaDistributionTarget _replicaDistributionTarget;
 
   /**
@@ -103,9 +107,12 @@ public class ReplicaDistributionGoal extends AbstractGoal {
    * they contain.
    */
   @Override
-  protected Collection<Broker> brokersToBalance(ClusterModel clusterModel) {
+  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
+    if (!clusterModel.deadBrokers().isEmpty()) {
+      return clusterModel.deadBrokers();
+    }
     // Brokers having over minimum number of replicas per broker are eligible for balancing.
-    Set<Broker> brokersToBalance = new HashSet<>();
+    SortedSet<Broker> brokersToBalance = new TreeSet<>();
     int minNumReplicasPerBroker = _replicaDistributionTarget.minNumReplicasPerBroker();
     brokersToBalance.addAll(clusterModel.brokers().stream()
         .filter(broker -> broker.replicas().size() > minNumReplicasPerBroker)
@@ -132,11 +139,18 @@ public class ReplicaDistributionGoal extends AbstractGoal {
    * Initiates replica distribution goal.
    *
    * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics that should be excluded from the optimization proposals.
    */
   @Override
-  protected void initGoalState(ClusterModel clusterModel)
+  protected void initGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException {
-    Set<Broker> brokers = clusterModel.healthyBrokers();
+
+    // Sanity check to make sure that not all replicas are excluded.
+    if (clusterModel.topics().equals(excludedTopics)) {
+      LOG.warn("All replicas are excluded from {}.", name());
+    }
+
+    Set<Broker> healthyBrokers = clusterModel.healthyBrokers();
     // Populate a map of replica distribution target in the cluster.
     int numReplicasToBalance = 0;
     Map<TopicPartition, List<Integer>> replicaDistribution = clusterModel.getReplicaDistribution();
@@ -144,8 +158,8 @@ public class ReplicaDistributionGoal extends AbstractGoal {
       numReplicasToBalance += replicaList.size();
     }
 
-    _replicaDistributionTarget = new ReplicaDistributionTarget(numReplicasToBalance, brokers);
-    for (Broker broker : brokers) {
+    _replicaDistributionTarget = new ReplicaDistributionTarget(numReplicasToBalance, healthyBrokers);
+    for (Broker broker : healthyBrokers) {
       _replicaDistributionTarget.setBrokerEligibilityForReceivingReplica(broker.id(), broker.replicas().size());
     }
   }
@@ -156,7 +170,7 @@ public class ReplicaDistributionGoal extends AbstractGoal {
    * @param clusterModel The state of the cluster.
    */
   @Override
-  protected void updateGoalState(ClusterModel clusterModel)
+  protected void updateGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException {
     // Sanity check: No self-healing eligible replica should remain at a decommissioned broker.
     for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
@@ -186,7 +200,7 @@ public class ReplicaDistributionGoal extends AbstractGoal {
       healCluster(clusterModel, optimizedGoals);
     } else {
       // If broker is overloaded, move local replicas to eligible brokers.
-      _replicaDistributionTarget.moveReplicasInSourceBrokerToEligibleBrokers(clusterModel, new HashSet<>(broker.replicas()),
+      _replicaDistributionTarget.moveReplicasInSourceBrokerToEligibleBrokers(clusterModel, new TreeSet<>(broker.replicas()),
                                                                              optimizedGoals, excludedTopics);
     }
   }

@@ -18,11 +18,12 @@ import com.linkedin.kafka.cruisecontrol.model.Replica;
 
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import java.util.SortedSet;
+import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -106,8 +107,8 @@ public class PotentialNwOutGoal extends AbstractGoal {
    * they contain.
    */
   @Override
-  protected Collection<Broker> brokersToBalance(ClusterModel clusterModel) {
-    return clusterModel.brokers();
+  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
+    return clusterModel.deadBrokers().isEmpty() ? clusterModel.brokers() : clusterModel.deadBrokers();
   }
 
   /**
@@ -143,10 +144,12 @@ public class PotentialNwOutGoal extends AbstractGoal {
    * its initial attempt. Since self healing has not been executed yet, this flag is false.
    *
    * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics that should be excluded from the optimization proposals.
    */
   @Override
-  protected void initGoalState(ClusterModel clusterModel)
+  protected void initGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException {
+    // While proposals exclude the excludedTopics, the potential nw_out still considers replicas of the excludedTopics.
     _selfHealingDeadBrokersOnly = false;
   }
 
@@ -156,7 +159,7 @@ public class PotentialNwOutGoal extends AbstractGoal {
    * @param clusterModel The state of the cluster.
    */
   @Override
-  protected void updateGoalState(ClusterModel clusterModel)
+  protected void updateGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException {
     // Sanity check: No self-healing eligible replica should remain at a decommissioned broker.
     for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
@@ -191,8 +194,8 @@ public class PotentialNwOutGoal extends AbstractGoal {
                                     Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException {
     double capacityLimit = broker.capacityFor(Resource.NW_OUT) * _balancingConstraint.capacityThreshold(Resource.NW_OUT);
-    boolean estimatedMaxPossibleNwOutOverLimit
-        = clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
+    boolean estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty() &&
+        clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
     if (!estimatedMaxPossibleNwOutOverLimit) {
       // Estimated max possible utilization in broker is under the limit.
       return;
@@ -202,22 +205,24 @@ public class PotentialNwOutGoal extends AbstractGoal {
         clusterModel.healthyBrokers() : brokersUnderEstimatedMaxPossibleNwOut(clusterModel);
     // Attempt to move replicas to eligible brokers until either the estimated max possible network out
     // limit requirement is satisfied for the broker or all replicas are checked.
-    for (Replica replica : new ArrayList<>(broker.replicas())) {
-      if (excludedTopics.contains(replica.topicPartition().topic())) {
+    SortedSet<Replica> replicas = new TreeSet<>(broker.replicas());
+    for (Replica replica : replicas) {
+      if (shouldExclude(replica, excludedTopics)) {
         continue;
       }
       // Find the eligible brokers that this replica is allowed to move. Unless the target broker would go
       // over the potential outbound network capacity the movement will be successful.
       List<Broker> eligibleBrokers = new ArrayList<>(candidateBrokers);
       eligibleBrokers.removeAll(clusterModel.partition(replica.topicPartition()).partitionBrokers());
-      eligibleBrokers.sort((b1, b2) -> Double.compare(b2.leadershipLoad().expectedUtilizationFor(Resource.NW_OUT),
-                                                      b1.leadershipLoad().expectedUtilizationFor(Resource.NW_OUT)));
-      Integer destinationBrokerId =
+      eligibleBrokers.sort((b1, b2) -> Double.compare(b2.leadershipLoadForNwResources().expectedUtilizationFor(Resource.NW_OUT),
+                                                      b1.leadershipLoadForNwResources().expectedUtilizationFor(Resource.NW_OUT)));
+      Broker destinationBroker =
           maybeApplyBalancingAction(clusterModel, replica, eligibleBrokers, BalancingAction.REPLICA_MOVEMENT,
               optimizedGoals);
-      if (destinationBrokerId != null) {
+      if (destinationBroker != null) {
+        int destinationBrokerId = destinationBroker.id();
         // Check if broker capacity limit is satisfied now.
-        estimatedMaxPossibleNwOutOverLimit =
+        estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty() &&
             clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
         if (!estimatedMaxPossibleNwOutOverLimit) {
           break;
@@ -234,6 +239,7 @@ public class PotentialNwOutGoal extends AbstractGoal {
       // Utilization is above the max possible limit after all replicas in the source broker were checked.
       LOG.warn("Violated estimated max possible network out limit for broker id:{} limit:{} utilization:{}.",
           broker.id(), capacityLimit, clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT));
+      _succeeded = false;
     }
   }
 
@@ -281,5 +287,4 @@ public class PotentialNwOutGoal extends AbstractGoal {
       return _reasonForLastNegativeResult;
     }
   }
-
 }

@@ -7,6 +7,7 @@ package com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelGeneration;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedMap;
@@ -14,6 +15,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 
@@ -38,7 +40,7 @@ public class MetricCompletenessChecker {
   }
 
   /**
-   * Get the number of valid windows that meets the the minimum monitored partitions percentage requirement.
+   * Get the number of valid windows that meets the minimum monitored partitions percentage requirement.
    *
    * @param minMonitoredPartitionsPercentage the minimum monitored partitions percentage.
    * @param totalNumPartitions the total number of partitions.
@@ -82,7 +84,7 @@ public class MetricCompletenessChecker {
     long activeSnapshotWindow = _activeSnapshotWindow;
     for (long window : _validPartitionsByWindows.keySet()) {
       // Exclude the active window.
-      if (window >= from && window <= to && window != activeSnapshotWindow) {
+      if (window > from && window <= to && window != activeSnapshotWindow) {
         i++;
       }
     }
@@ -148,10 +150,14 @@ public class MetricCompletenessChecker {
 
   private void updateWindowMetricCompleteness(Cluster cluster, long window, String topic) {
     int numValidPartitions = _validPartitionsPerTopicByWindows.get(window).get(topic).size();
-    int numPartitions = cluster.partitionsForTopic(topic).size();
-    _validPartitionsByWindows.compute(window, (w, v) -> {
-      int newValue = (v == null ? 0 : v);
-      return numValidPartitions == numPartitions ? newValue + numPartitions : newValue;
-    });
+    List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
+    // The topic may have been deleted so the cluster does not have it.
+    if (partitions != null) {
+      int numPartitions = partitions.size();
+      _validPartitionsByWindows.compute(window, (w, v) -> {
+        int newValue = (v == null ? 0 : v);
+        return numValidPartitions == numPartitions ? newValue + numPartitions : newValue;
+      });
+    }
   }
 }

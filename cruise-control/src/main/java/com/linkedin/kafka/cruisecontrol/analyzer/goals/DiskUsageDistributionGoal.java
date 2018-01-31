@@ -36,7 +36,7 @@ public class DiskUsageDistributionGoal extends ResourceDistributionGoal {
 
   @Override
   public boolean isProposalAcceptable(BalancingProposal proposal, ClusterModel clusterModel) {
-    /// Leader ship movement won't cause disk utilization change.
+    /// Leadership movement won't cause disk utilization change.
     return proposal.balancingAction() == BalancingAction.LEADERSHIP_MOVEMENT
         || super.isProposalAcceptable(proposal, clusterModel);
   }

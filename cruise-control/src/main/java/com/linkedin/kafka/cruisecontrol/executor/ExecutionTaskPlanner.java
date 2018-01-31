@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,14 +43,14 @@ public class ExecutionTaskPlanner {
   private final Logger LOG = LoggerFactory.getLogger(ExecutionTaskPlanner.class);
   private final Map<Integer, Map<Long, ExecutionTask>> _partMoveProposalByBrokerId;
   private volatile long _dataToMove;
-  private final Set<ExecutionTask> _remainingPartitionMovements;
+  private final Set<ExecutionTask> _remainingReplicaMovements;
   private final Map<Long, ExecutionTask> _leaderMovements;
   private final AtomicLong _executionId;
 
   public ExecutionTaskPlanner() {
     _executionId = new AtomicLong(0L);
     _partMoveProposalByBrokerId = new HashMap<>();
-    _remainingPartitionMovements = new TreeSet<>();
+    _remainingReplicaMovements = new TreeSet<>();
     _dataToMove = 0L;
     _leaderMovements = new HashMap<>();
   }
@@ -71,7 +72,7 @@ public class ExecutionTaskPlanner {
     ExecutionTask executionTask = new ExecutionTask(proposalExecutionId, proposal);
     // Check if partition movement is required.
     if (proposal.balancingAction() == BalancingAction.REPLICA_MOVEMENT) {
-      _remainingPartitionMovements.add(executionTask);
+      _remainingReplicaMovements.add(executionTask);
       _dataToMove += proposal.dataToMove();
       // Add the proposal to source broker execution plan
       int sourceBroker = proposal.sourceBrokerId();
@@ -98,10 +99,10 @@ public class ExecutionTaskPlanner {
   }
 
   /**
-   * Get the remaining partition movement tasks.
+   * Get the remaining replica movement tasks.
    */
-  public Set<ExecutionTask> remainingPartitionMovements() {
-    return _remainingPartitionMovements;
+  public Set<ExecutionTask> remainingReplicaMovements() {
+    return _remainingReplicaMovements;
   }
 
   /**
@@ -129,14 +130,18 @@ public class ExecutionTaskPlanner {
   }
 
   /**
-   * Get a list of executable partition movements that comply with the concurrency constraint.
+   * Get a list of executable replica movements that comply with the concurrency constraint.
    *
    * @param readyBrokers The brokers that is ready to execute more movements.
+   * @param inProgressPartitions Topic partitions of replicas that are already in progress. This is needed because the
+   *                             controller does not allow updating the ongoing replica reassignment for a partition
+   *                             whose replica is being reassigned.
    * @return A list of movements that is executable for the ready brokers.
    */
-  public List<ExecutionTask> getPartitionMovementTasks(Map<Integer, Integer> readyBrokers) {
+  public List<ExecutionTask> getReplicaMovementTasks(Map<Integer, Integer> readyBrokers,
+                                                       Set<TopicPartition> inProgressPartitions) {
     LOG.trace("Getting tasks for brokers with concurrency {}", readyBrokers);
-    List<ExecutionTask> executablePartitionMovements = new ArrayList<>();
+    List<ExecutionTask> executableReplicaMovements = new ArrayList<>();
     /**
      * The algorithm avoids unfair situation where the available movement slots of a broker is completely taken
      * by another broker. It checks the proposals in a round-robin manner that makes sure each ready broker gets
@@ -144,6 +149,7 @@ public class ExecutionTaskPlanner {
      */
     boolean newTaskAdded = true;
     Set<Integer> brokerInvolved = new HashSet<>();
+    Set<TopicPartition> partitionsInvolved = new HashSet<>();
     while (newTaskAdded) {
       newTaskAdded = false;
       brokerInvolved.clear();
@@ -168,10 +174,13 @@ public class ExecutionTaskPlanner {
             if (brokerInvolved.contains(sourceBroker) || brokerInvolved.contains(destinationBroker)) {
               continue;
             }
-
+            TopicPartition tp = task.proposal.topicPartition();
             // Check if the proposal is executable.
-            if (isExecutableProposal(task.proposal, readyBrokers)) {
-              executablePartitionMovements.add(task);
+            if (isExecutableProposal(task.proposal, readyBrokers)
+                && !inProgressPartitions.contains(tp)
+                && !partitionsInvolved.contains(tp)) {
+              partitionsInvolved.add(tp);
+              executableReplicaMovements.add(task);
               // Record the two brokers as involved in this round and stop involving them again in this round.
               brokerInvolved.add(sourceBroker);
               brokerInvolved.add(destinationBroker);
@@ -190,7 +199,7 @@ public class ExecutionTaskPlanner {
         }
       }
     }
-    return executablePartitionMovements;
+    return executableReplicaMovements;
   }
 
   /**
@@ -199,6 +208,8 @@ public class ExecutionTaskPlanner {
   public void clear() {
     _leaderMovements.clear();
     _partMoveProposalByBrokerId.clear();
+    _remainingReplicaMovements.clear();
+    _dataToMove = 0L;
   }
 
   /**
@@ -216,7 +227,7 @@ public class ExecutionTaskPlanner {
     int destinationBroker = task.proposal.destinationBrokerId();
     _partMoveProposalByBrokerId.get(sourceBroker).remove(task.executionId);
     _partMoveProposalByBrokerId.get(destinationBroker).remove(task.executionId);
-    _remainingPartitionMovements.remove(task);
+    _remainingReplicaMovements.remove(task);
     _dataToMove -= task.proposal.dataToMove();
   }
 

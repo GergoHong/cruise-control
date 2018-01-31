@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import java.util.Map;
+import java.util.SortedSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,21 +68,21 @@ public abstract class AbstractGoal implements Goal {
   @Override
   public boolean optimize(ClusterModel clusterModel, Set<Goal> optimizedGoals, Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException, OptimizationFailureException {
+    _succeeded = true;
     LOG.debug("Starting optimization for {}.", name());
     // Initialize pre-optimized stats.
     ClusterModelStats statsBeforeOptimization = clusterModel.getClusterStats(_balancingConstraint);
     LOG.trace("[PRE - {}] {}", name(), statsBeforeOptimization);
     _finished = false;
     long goalStartTime = System.currentTimeMillis();
-    initGoalState(clusterModel);
+    initGoalState(clusterModel, excludedTopics);
     Collection<Broker> deadBrokers = clusterModel.deadBrokers();
 
-    Collection<Broker> brokersToOptimize = deadBrokers.isEmpty() ? brokersToBalance(clusterModel) : deadBrokers;
     while (!_finished) {
-      for (Broker broker : brokersToOptimize) {
+      for (Broker broker : brokersToBalance(clusterModel)) {
         rebalanceForBroker(broker, clusterModel, optimizedGoals, excludedTopics);
       }
-      updateGoalState(clusterModel);
+      updateGoalState(clusterModel, excludedTopics);
     }
     ClusterModelStats statsAfterOptimization = clusterModel.getClusterStats(_balancingConstraint);
     LOG.trace("[POST - {}] {}", name(), statsAfterOptimization);
@@ -107,13 +108,24 @@ public abstract class AbstractGoal implements Goal {
   public abstract String name();
 
   /**
-   * Get brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
+   * Check whether the replica should be excluded from the rebalance. A replica should be excluded if its topic
+   * is in the excluded topics set and its broker is still alive.
+   * @param replica the replica to check.
+   * @param excludedTopics the excluded topics set.
+   * @return true if the replica should be excluded, false otherwise.
+   */
+  protected boolean shouldExclude(Replica replica, Set<String> excludedTopics) {
+    return excludedTopics.contains(replica.topicPartition().topic()) && replica.originalBroker().isAlive();
+  }
+
+  /**
+   * Get sorted brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
    *
    * @param clusterModel The state of the cluster.
    * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
    * they contain.
    */
-  protected abstract Collection<Broker> brokersToBalance(ClusterModel clusterModel);
+  protected abstract SortedSet<Broker> brokersToBalance(ClusterModel clusterModel);
 
   /**
    * Check if requirements of this goal are not violated if this proposal is applied to the given cluster state,
@@ -139,16 +151,18 @@ public abstract class AbstractGoal implements Goal {
    * requirements of hard goals.
    *
    * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics that should be excluded from the optimization proposals.
    */
-  protected abstract void initGoalState(ClusterModel clusterModel)
+  protected abstract void initGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException, ModelInputException;
 
   /**
    * Update goal state after one round of self-healing / rebalance.
    *
    * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics that should be excluded from the optimization proposal.
    */
-  protected abstract void updateGoalState(ClusterModel clusterModel)
+  protected abstract void updateGoalState(ClusterModel clusterModel, Set<String> excludedTopics)
       throws AnalysisInputException, OptimizationFailureException;
 
   /**
@@ -163,11 +177,11 @@ public abstract class AbstractGoal implements Goal {
                                              ClusterModel clusterModel,
                                              Set<Goal> optimizedGoals,
                                              Set<String> excludedTopics)
-      throws AnalysisInputException, ModelInputException;
+      throws AnalysisInputException, ModelInputException, OptimizationFailureException;
 
   /**
-   * Attempt to apply the given balancing action to the given replica in the given cluster. The application attempts
-   * considers the eligible brokers as the potential destination brokers for replica movement or the location of
+   * Attempt to apply the given balancing action to the given replica in the given cluster. The application
+   * considers the candidate brokers as the potential destination brokers for replica movement or the location of
    * followers for leadership transfer. If the movement attempt succeeds, the function returns the broker id of the
    * destination, otherwise the function returns null.
    *
@@ -179,43 +193,61 @@ public abstract class AbstractGoal implements Goal {
    * @param optimizedGoals  Optimized goals.
    * @return Broker id of the destination if the movement attempt succeeds, null otherwise.
    */
-  protected Integer maybeApplyBalancingAction(ClusterModel clusterModel,
+  protected Broker maybeApplyBalancingAction(ClusterModel clusterModel,
                                               Replica replica,
-                                              List<Broker> candidateBrokers,
+                                              Collection<Broker> candidateBrokers,
                                               BalancingAction action,
                                               Set<Goal> optimizedGoals)
       throws ModelInputException, AnalysisInputException {
-    List<Broker> eligibleBrokers = getEligibleBrokers(clusterModel, replica, candidateBrokers);
+    // In self healing mode, allow a move only from dead to alive brokers.
+    if (!clusterModel.deadBrokers().isEmpty() && replica.originalBroker().isAlive()) {
+      //return null;
+      LOG.trace("Applying {} to a replica in a healthy broker in self-healing mode.", action);
+    }
+    Collection<Broker> eligibleBrokers = getEligibleBrokers(clusterModel, replica, candidateBrokers);
     for (Broker broker : eligibleBrokers) {
       BalancingProposal optimizedGoalProposal =
           new BalancingProposal(replica.topicPartition(), replica.broker().id(), broker.id(), action);
       // A replica should be moved if:
+      // 0. The move is legit.
       // 1. The goal requirements are not violated if this proposal is applied to the given cluster state.
       // 2. The movement is acceptable by the previously optimized goals.
-      boolean selfSatisfied = selfSatisfied(clusterModel, optimizedGoalProposal);
-      boolean satisfyOptimizedGoals = AnalyzerUtils.isProposalAcceptableForOptimizedGoals(optimizedGoals, optimizedGoalProposal, clusterModel);
-      LOG.trace("Trying to apply balancing action {}, selfSatisfied = {}, satisfyOptimizedGoals = {}",
-                optimizedGoalProposal, selfSatisfied, satisfyOptimizedGoals);
-      if (selfSatisfied && satisfyOptimizedGoals) {
+      boolean canMove = legitMove(replica, broker, action);
+      canMove = canMove && selfSatisfied(clusterModel, optimizedGoalProposal);
+      canMove = canMove && AnalyzerUtils.isProposalAcceptableForOptimizedGoals(optimizedGoals, optimizedGoalProposal, clusterModel);
+      LOG.trace("Trying to apply balancing action {}, legitMove = {}, selfSatisfied = {}, satisfyOptimizedGoals = {}",
+          optimizedGoalProposal, legitMove(replica, broker, action), selfSatisfied(clusterModel, optimizedGoalProposal),
+          AnalyzerUtils.isProposalAcceptableForOptimizedGoals(optimizedGoals, optimizedGoalProposal, clusterModel));
+      if (canMove) {
         if (action == BalancingAction.LEADERSHIP_MOVEMENT) {
           clusterModel.relocateLeadership(replica.topicPartition(), replica.broker().id(), broker.id());
         } else if (action == BalancingAction.REPLICA_MOVEMENT) {
           clusterModel.relocateReplica(replica.topicPartition(), replica.broker().id(), broker.id());
         }
-        return broker.id();
+        return broker;
       }
     }
     return null;
   }
 
-  private List<Broker> getEligibleBrokers(ClusterModel clusterModel,
-                                          Replica replica,
-                                          List<Broker> candidateBrokers) {
+  private boolean legitMove(Replica replica, Broker destBroker, BalancingAction balancingAction) {
+    if (balancingAction == BalancingAction.REPLICA_MOVEMENT && destBroker.replica(replica.topicPartition()) == null) {
+      return true;
+    } else if (balancingAction == BalancingAction.LEADERSHIP_MOVEMENT && replica.isLeader()
+        && destBroker.replica(replica.topicPartition()) != null) {
+      return true;
+    }
+    return false;
+  }
+
+  private Collection<Broker> getEligibleBrokers(ClusterModel clusterModel,
+                                                Replica replica,
+                                                Collection<Broker> candidateBrokers) {
     if (clusterModel.newBrokers().isEmpty()) {
       return candidateBrokers;
     } else {
       List<Broker> eligibleBrokers = new ArrayList<>();
-      // When there is new brokers, we should only allow the replicas to be moved to the new brokers.
+      // When there are new brokers, we should only allow the replicas to be moved to the new brokers.
       candidateBrokers.forEach(b -> {
         if (b.isNew() || b == replica.originalBroker()) {
           eligibleBrokers.add(b);

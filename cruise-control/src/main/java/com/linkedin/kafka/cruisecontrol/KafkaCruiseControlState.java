@@ -7,7 +7,9 @@ package com.linkedin.kafka.cruisecontrol;
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerState;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorState;
 import com.linkedin.kafka.cruisecontrol.monitor.LoadMonitorState;
-
+import java.util.HashMap;
+import java.util.Map;
+import com.google.gson.Gson;
 
 public class KafkaCruiseControlState {
   private ExecutorState _executorState;
@@ -32,6 +34,30 @@ public class KafkaCruiseControlState {
 
   public AnalyzerState analyzerState() {
     return _analyzerState;
+  }
+
+  /**
+   * Return a valid JSON encoded string
+   *
+   * @param version JSON version
+   */
+  public String getJSONString(int version) {
+    Gson gson = new Gson();
+    Map<String, Object> jsonStructure = getJsonStructure();
+    jsonStructure.put("version", version);
+    return gson.toJson(jsonStructure);
+  }
+
+  /*
+   * Return an object that can be further used
+   * to encode into JSON
+   */
+  public Map<String, Object> getJsonStructure() {
+    Map<String, Object> cruiseControlState = new HashMap<>();
+    cruiseControlState.put("MonitorState", _monitorState.getJsonStructure());
+    cruiseControlState.put("ExecutorState", _executorState.getJsonStructure());
+    cruiseControlState.put("AnalyzerState", _analyzerState.getJsonStructure());
+    return cruiseControlState;
   }
 
   @Override

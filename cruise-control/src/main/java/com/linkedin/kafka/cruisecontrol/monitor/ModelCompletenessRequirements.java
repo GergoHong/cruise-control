@@ -3,9 +3,11 @@
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * This class is created to describe the requirements of the model. In cruise control, the requirement
+ * This class is created to describe the requirements of the model. In Cruise Control, the requirement
  * of the monitored performance metrics differs in different scenarios. For example, RackAwareness goal do not really
  * need any load information, but it need to include all the topics. On the other hand, resource distribution
  * would need more load information.
@@ -88,7 +90,7 @@ public class ModelCompletenessRequirements {
 
   /**
    * Combine the requirements of this ModelCompletenessRequirements and another one.
-   * The result will be the weaker weaker one for each requirement in the two specifications.
+   * The result will be the weaker one for each requirement in the two specifications.
    *
    * @param other the other ModelCompletenessRequirements
    * @return the combined weaker model completeness requirements.
@@ -102,9 +104,21 @@ public class ModelCompletenessRequirements {
                                              _includeAllTopics && other.includeAllTopics());
   }
 
+  /*
+   * Return an object that can be further used
+   * to encode into JSON
+   */
+  public Map<String, Object> getJsonStructure() {
+    Map<String, Object> requirements = new HashMap<>();
+    requirements.put("requiredNumSnapshots", _minRequiredNumSnapshotWindows);
+    requirements.put("minMonitoredPartitionsPercentage", _minMonitoredPartitionsPercentage);
+    requirements.put("includeAllTopics", _includeAllTopics);
+    return requirements;
+  }
+
   @Override
   public String toString() {
-    return String.format("(requiredNumSnapshots=%d, minMonitoredPartitionPercentage=%.3f, includedAllTopics=%s)",
+    return String.format("(requiredNumWindows=%d, minMonitoredPartitionPercentage=%.3f, includedAllTopics=%s)",
                          _minRequiredNumSnapshotWindows, _minMonitoredPartitionsPercentage, _includeAllTopics);
   }
 

@@ -8,6 +8,8 @@ import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
 
+import com.google.gson.Gson;
+
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.Snapshot;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -100,14 +102,11 @@ public class Load implements Serializable {
    * @return A single representative utilization value on a resource.
    */
   public double expectedUtilizationFor(Resource resource) {
-    if (resource.equals(Resource.DISK)) {
-      if (_snapshotsByTime.isEmpty()) {
-        return 0.0;
-      }
-      return _snapshotsByTime.get(0).utilizationFor(resource);
+    if (_snapshotsByTime.isEmpty()) {
+      return 0.0;
     }
-
-    return _accumulatedUtilization[resource.id()] / _snapshotsByTime.size();
+    return resource == Resource.DISK ? Math.max(0, _snapshotsByTime.get(0).utilizationFor(resource)) :
+        Math.max(0, _accumulatedUtilization[resource.id()] / _snapshotsByTime.size());
   }
 
   /**
@@ -327,6 +326,28 @@ public class Load implements Serializable {
       times[i] = _snapshotsByTime.get(i).time();
     }
     return times;
+  }
+
+  /*
+   * Return a valid JSON encoded string
+   */
+  public String getJSONString() {
+    Gson gson = new Gson();
+    return gson.toJson(getJsonStructure());
+  }
+
+  /*
+   * Return an object that can be further used
+   * to encode into JSON
+   */
+  public Map<String, Object> getJsonStructure() {
+    Map<String, Object> loadMap = new HashMap<>();
+    List<Object> snapList = new ArrayList<>();
+    for (Snapshot snapshot : _snapshotsByTime) {
+      snapList.add(snapshot.getJsonStructureForLoad());
+    }
+    loadMap.put("snapshots", snapList);
+    return loadMap;
   }
 
   /**
